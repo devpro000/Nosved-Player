@@ -1,0 +1,469 @@
+package com.devson.nvplayer.ui.screen.library
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.*
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.devson.nvplayer.data.database.EpisodeEntity
+import com.devson.nvplayer.data.model.LibraryMediaType
+import com.devson.nvplayer.data.model.SeriesDetail
+import com.devson.nvplayer.ui.common.components.PreviewFloatingActionButton
+import com.devson.nvplayer.ui.screen.library.components.EpisodeListItem
+import com.devson.nvplayer.viewmodel.LibraryViewModel
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SeriesDetailScreen(
+    seriesId: Long,
+    viewModel: LibraryViewModel,
+    onEpisodeSelected: (EpisodeEntity, List<EpisodeEntity>) -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var seriesDetail by remember { mutableStateOf<SeriesDetail?>(null) }
+    var selectedSeasonIndex by remember { mutableIntStateOf(0) }
+    val listState = rememberLazyListState()
+    val context = LocalContext.current
+
+    val activeVideos by viewModel.videoListViewModel.activeVideosFlat.collectAsStateWithLifecycle()
+
+    LaunchedEffect(seriesId, activeVideos) {
+        val hadPreviousDetail = seriesDetail != null
+        val detail = viewModel.getSeriesDetails(seriesId)
+        seriesDetail = detail
+        if (detail == null && hadPreviousDetail) {
+            onBack()
+        }
+    }
+
+    val detail = seriesDetail
+
+    if (detail == null) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+        }
+        return
+    }
+
+    val seasons = detail.seasonsWithEpisodes
+    val safeSeasonIndex = selectedSeasonIndex.coerceIn(0, (seasons.size - 1).coerceAtLeast(0))
+    val currentSeason = seasons.getOrNull(safeSeasonIndex)
+    val currentEpisodes = currentSeason?.episodes ?: emptyList()
+    val firstEpisodeUri = currentEpisodes.firstOrNull()?.fileUri
+
+    val isScrolledPastBackdrop by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex >= 1
+        }
+    }
+
+    val showTopBarTitle by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex > 1 ||
+                (listState.firstVisibleItemIndex == 1 && listState.firstVisibleItemScrollOffset > 80)
+        }
+    }
+
+    val topBarColor by animateColorAsState(
+        targetValue = if (isScrolledPastBackdrop) {
+            MaterialTheme.colorScheme.background
+        } else {
+            Color.Transparent
+        },
+        animationSpec = tween(durationMillis = 200),
+        label = "topBarColor"
+    )
+
+    val view = LocalView.current
+    val isDarkTheme = isSystemInDarkTheme()
+    DisposableEffect(view, isScrolledPastBackdrop, isDarkTheme) {
+        val window = (view.context as? android.app.Activity)?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, view) }
+        val originalLightStatusBars = controller?.isAppearanceLightStatusBars ?: !isDarkTheme
+
+        controller?.isAppearanceLightStatusBars = if (isScrolledPastBackdrop) !isDarkTheme else false
+
+        onDispose {
+            controller?.isAppearanceLightStatusBars = originalLightStatusBars
+        }
+    }
+
+    val imageRequest = remember(firstEpisodeUri) {
+        ImageRequest.Builder(context)
+            .data(firstEpisodeUri)
+            .size(640, 360)
+            .precision(coil3.size.Precision.INEXACT)
+            .memoryCachePolicy(CachePolicy.ENABLED)
+            .diskCachePolicy(CachePolicy.ENABLED)
+            .crossfade(false)
+            .build()
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 150.dp)
+        ) {
+            // 1. Collapsing Backdrop Header with Parallax / Fade
+            item(key = "header_backdrop") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp)
+                        .graphicsLayer {
+                            val fade = if (listState.firstVisibleItemIndex == 0) {
+                                (1f - (listState.firstVisibleItemScrollOffset / 600f)).coerceIn(0.2f, 1f)
+                            } else 0f
+                            alpha = fade
+                            translationY = -listState.firstVisibleItemScrollOffset * 0.3f
+                        }
+                ) {
+                    AsyncImage(
+                        model = imageRequest,
+                        contentDescription = detail.series.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    // Cinematic Gradient
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Black.copy(alpha = 0.4f),
+                                        Color.Transparent,
+                                        MaterialTheme.colorScheme.background
+                                    )
+                                )
+                            )
+                    )
+
+                    // Play Next / Play All FAB
+                    if (currentEpisodes.isNotEmpty()) {
+                        FilledIconButton(
+                            onClick = {
+                                val firstEp = currentEpisodes.first()
+                                onEpisodeSelected(firstEp, currentEpisodes)
+                            },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 20.dp, bottom = 12.dp)
+                                .size(56.dp),
+                            shape = CircleShape,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = "Play Series",
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 2. Metadata Section
+            item(key = "series_metadata") {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = detail.series.title,
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 26.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Badges row
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val typeName = "Series"
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = typeName,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                ),
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "${seasons.size} Season${if (seasons.size > 1) "s" else ""}",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "${detail.totalEpisodes} Episodes",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Synopsis
+                    Text(
+                        text = detail.series.synopsis ?: "Watch all episodes of ${detail.series.title} categorized in high definition with automated subtitle and chapter detection.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 20.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                        thickness = 1.dp
+                    )
+                }
+            }
+
+            // 3. Season Selector
+            if (seasons.size > 1) {
+                item(key = "season_selector") {
+                    ScrollableTabRow(
+                        selectedTabIndex = safeSeasonIndex,
+                        edgePadding = 16.dp,
+                        containerColor = Color.Transparent,
+                        divider = {},
+                        indicator = { tabPositions ->
+                            if (safeSeasonIndex < tabPositions.size) {
+                                TabRowDefaults.SecondaryIndicator(
+                                    modifier = Modifier.tabIndicatorOffset(tabPositions[safeSeasonIndex]),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    height = 3.dp
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        seasons.forEachIndexed { index, s ->
+                            Tab(
+                                selected = safeSeasonIndex == index,
+                                onClick = { selectedSeasonIndex = index },
+                                text = {
+                                    Text(
+                                        text = "Season ${s.season.seasonNumber}",
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            fontWeight = if (safeSeasonIndex == index) FontWeight.Bold else FontWeight.Normal
+                                        ),
+                                        color = if (safeSeasonIndex == index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+
+            // 4. Episodes List Header
+            item(key = "episodes_header") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Episodes (${currentEpisodes.size})",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 17.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
+            // 5. Episode List Items
+            items(
+                items = currentEpisodes,
+                key = { it.id },
+                contentType = { "episode_item" }
+            ) { episode ->
+                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    EpisodeListItem(
+                        episode = episode,
+                        durationMs = episode.durationMillis,
+                        onPlayClick = {
+                            onEpisodeSelected(episode, currentEpisodes)
+                        }
+                    )
+                }
+            }
+        }
+
+        // Top App Bar with back button covering status bar
+        Surface(
+            color = topBarColor,
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (!isScrolledPastBackdrop) {
+                            Modifier.background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Black.copy(alpha = 0.5f),
+                                        Color.Transparent
+                                    )
+                                )
+                            )
+                        } else Modifier
+                    )
+                    .statusBarsPadding()
+                    .height(56.dp)
+                    .padding(horizontal = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilledIconButton(
+                        onClick = onBack,
+                        modifier = Modifier.size(40.dp),
+                        shape = CircleShape,
+                        colors = if (isScrolledPastBackdrop) {
+                            IconButtonDefaults.filledIconButtonColors(
+                                containerColor = Color.Transparent,
+                                contentColor = MaterialTheme.colorScheme.onSurface
+                            )
+                        } else {
+                            IconButtonDefaults.filledIconButtonColors(
+                                containerColor = Color.Black.copy(alpha = 0.45f),
+                                contentColor = Color.White
+                            )
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    AnimatedVisibility(
+                        visible = showTopBarTitle,
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
+                        Text(
+                            text = detail.series.title,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 12.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Floating Action Button (FAB) padded above bottom navigation capsule
+        val allEpisodes = remember(seasons) { seasons.flatMap { it.episodes } }
+        val resumeEpisode = remember(allEpisodes) {
+            allEpisodes.firstOrNull { it.lastPlaybackPosition > 0L && !it.isWatched }
+                ?: allEpisodes.firstOrNull { !it.isWatched }
+                ?: allEpisodes.firstOrNull()
+        }
+        val viewSettings by viewModel.videoListViewModel.viewSettings.collectAsStateWithLifecycle()
+
+        if (viewSettings.showQuickFab && resumeEpisode != null) {
+            PreviewFloatingActionButton(
+                enablePreview = viewSettings.enableFabPreview,
+                previewUri = resumeEpisode.fileUri,
+                previewTitle = resumeEpisode.title ?: "${detail.series.title} - E${resumeEpisode.episodeNumber}",
+                previewDurationMs = resumeEpisode.durationMillis,
+                previewLastPositionMs = resumeEpisode.lastPlaybackPosition,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 88.dp),
+                onPlay = {
+                    onEpisodeSelected(resumeEpisode, currentEpisodes.ifEmpty { allEpisodes })
+                }
+            )
+        }
+    }
+}

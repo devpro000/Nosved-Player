@@ -1,0 +1,190 @@
+package com.devson.nvplayer.ui.screen.videolist.components.folder
+
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import com.devson.nvplayer.R
+import com.devson.nvplayer.domain.model.LayoutMode
+import com.devson.nvplayer.domain.model.Video
+import com.devson.nvplayer.domain.model.VideoFolder
+import com.devson.nvplayer.domain.model.ViewSettings
+import com.devson.nvplayer.domain.model.WatchHistory
+import com.devson.nvplayer.ui.common.components.CustomEmptyStateView
+import com.devson.nvplayer.ui.common.components.fastscroll.FastScroller
+import com.devson.nvplayer.ui.common.components.fastscroll.FastScrollSectionHelper
+import com.devson.nvplayer.ui.screens.videolist.utils.applyFolderSort
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun FolderListContent(
+    folders: Map<VideoFolder, List<Video>>,
+    settings: ViewSettings,
+    selectedFolders: Set<VideoFolder>,
+    historyMap: Map<String, WatchHistory> = emptyMap(),
+    onFolderClick: (VideoFolder) -> Unit,
+    onFolderLongClick: (VideoFolder) -> Unit,
+    listState: LazyListState = rememberLazyListState(),
+    gridState: LazyGridState = rememberLazyGridState(),
+    contentPadding: PaddingValues = PaddingValues(0.dp),
+    isPermissionRequired: Boolean = false,
+    onPermissionClick: (() -> Unit)? = null,
+    onScanClick: () -> Unit = {}
+) {
+    val haptic = LocalHapticFeedback.current
+    val sortedFolders = remember(folders, settings.sortField, settings.sortDirection, historyMap) {
+        folders.keys.toList().applyFolderSort(folders, settings.sortField, settings.sortDirection, historyMap)
+    }
+    val currentOnFolderClick by rememberUpdatedState(onFolderClick)
+    val currentOnFolderLongClick by rememberUpdatedState(onFolderLongClick)
+
+    val mostRecentHistoryUri = remember(historyMap) {
+        historyMap.values.filter { it.lastPlayedAt > 0L }.maxByOrNull { it.lastPlayedAt }?.uri
+    }
+    val mostRecentFolderId = remember(mostRecentHistoryUri, folders) {
+        if (mostRecentHistoryUri == null) null
+        else folders.entries.firstOrNull { (_, videos) -> videos.any { it.uri == mostRecentHistoryUri } }?.key?.id
+    }
+
+    if (sortedFolders.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (isPermissionRequired) {
+                CustomEmptyStateView(
+                    icon = Icons.Filled.FolderOpen,
+                    heading = "Storage Access Required",
+                    subtext = "Android 15 requires All Files Access permission to browse and play videos from external USB drives.",
+                    ctaLabel = "Grant Permission",
+                    onCtaClick = onPermissionClick
+                )
+            } else {
+                CustomEmptyStateView(
+                    icon = Icons.Filled.VideoLibrary,
+                    heading = stringResource(R.string.folder_no_folders_found),
+                    subtext = stringResource(R.string.folder_no_folders_desc),
+                    ctaLabel = stringResource(R.string.folder_scan_cta),
+                    onCtaClick = onScanClick
+                )
+            }
+        }
+        return
+    }
+
+    FastScroller(
+        itemCount = sortedFolders.size,
+        listState = if (settings.layoutMode == LayoutMode.LIST) listState else null,
+        gridState = if (settings.layoutMode == LayoutMode.GRID) gridState else null,
+        contentPadding = contentPadding,
+        sectionLabelProvider = { index ->
+            val folder = sortedFolders.getOrNull(index)
+            FastScrollSectionHelper.getFolderSectionLabel(
+                folder = folder,
+                videos = if (folder != null) folders[folder] else null,
+                sortField = settings.sortField
+            )
+        }
+    ) {
+        if (settings.layoutMode == LayoutMode.GRID) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(settings.gridColumns),
+                state = gridState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 8.dp,
+                    top = contentPadding.calculateTopPadding() + 8.dp,
+                    end = 8.dp,
+                    bottom = contentPadding.calculateBottomPadding() + 8.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(
+                    items = sortedFolders,
+                    key = { folder -> folder.id },
+                    contentType = { "folder_item" }
+                ) { folder ->
+                    val folderVideos = folders[folder] ?: emptyList()
+                    val isRecentlyPlayed = folder.id == mostRecentFolderId
+                    val onClick = remember(folder) { { currentOnFolderClick(folder) } }
+                    val onLongClick = remember(folder) {
+                        {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            currentOnFolderLongClick(folder)
+                        }
+                    }
+                    FolderGridItem(
+                        folder = folder,
+                        videos = folderVideos,
+                        settings = settings,
+                        isSelected = folder in selectedFolders,
+                        isRecentlyPlayed = isRecentlyPlayed,
+                        historyMap = historyMap,
+                        onClick = onClick,
+                        onLongClick = onLongClick
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    top = contentPadding.calculateTopPadding(),
+                    bottom = contentPadding.calculateBottomPadding() + 16.dp
+                )
+            ) {
+                items(
+                    items = sortedFolders,
+                    key = { folder -> folder.id },
+                    contentType = { "folder_item" }
+                ) { folder ->
+                    val folderVideos = folders[folder] ?: emptyList()
+                    val isRecentlyPlayed = folder.id == mostRecentFolderId
+                    val onClick = remember(folder) { { currentOnFolderClick(folder) } }
+                    val onLongClick = remember(folder) {
+                        {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            currentOnFolderLongClick(folder)
+                        }
+                    }
+                    FolderListItem(
+                        folder = folder,
+                        videos = folderVideos,
+                        settings = settings,
+                        isSelected = folder in selectedFolders,
+                        isRecentlyPlayed = isRecentlyPlayed,
+                        historyMap = historyMap,
+                        onClick = onClick,
+                        onLongClick = onLongClick
+                    )
+                }
+            }
+        }
+    }
+}

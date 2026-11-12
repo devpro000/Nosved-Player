@@ -1,0 +1,12 @@
+package com.devson.nvplayer.player.model
+
+enum class DecoderMode(val value: String, val displayName: String) {
+    HW("mediacodec", "HW"),
+    HW_PLUS("mediacodec-copy", "HW+"),
+    SW("no", "SW");
+
+    fun next(): DecoderMode {
+        val values = entries.toTypedArray()
+        return values[(ordinal + 1) % values.size]
+    }
+}

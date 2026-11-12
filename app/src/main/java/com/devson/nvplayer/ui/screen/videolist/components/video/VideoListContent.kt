@@ -1,0 +1,181 @@
+package com.devson.nvplayer.ui.screen.videolist.components.video
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.ui.res.stringResource
+import com.devson.nvplayer.R
+import com.devson.nvplayer.domain.model.LayoutMode
+import com.devson.nvplayer.domain.model.Video
+import com.devson.nvplayer.domain.model.ViewSettings
+import com.devson.nvplayer.domain.model.WatchHistory
+import com.devson.nvplayer.ui.common.components.CustomEmptyStateView
+import com.devson.nvplayer.ui.common.components.fastscroll.FastScroller
+import com.devson.nvplayer.ui.common.components.fastscroll.FastScrollSectionHelper
+
+@Composable
+fun VideoListContent(
+    videos: List<Video>,
+    settings: ViewSettings,
+    selectedVideos: Set<Video>,
+    historyMap: Map<String, WatchHistory> = emptyMap(),
+    folderKey: String? = null,
+    onVideoClick: (Video) -> Unit,
+    onVideoLongClick: (Video) -> Unit,
+    onInfoClick: ((Video) -> Unit)? = null,
+    listState: LazyListState = rememberLazyListState(),
+    gridState: LazyGridState = rememberLazyGridState(),
+    contentPadding: PaddingValues = PaddingValues(0.dp),
+    isPermissionRequired: Boolean = false,
+    onPermissionClick: (() -> Unit)? = null,
+    onScanClick: () -> Unit = {}
+) {
+    val currentOnVideoClick by rememberUpdatedState(onVideoClick)
+    val currentOnVideoLongClick by rememberUpdatedState(onVideoLongClick)
+    val currentOnInfoClick by rememberUpdatedState(onInfoClick)
+
+    if (videos.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (isPermissionRequired) {
+                CustomEmptyStateView(
+                    icon = Icons.Filled.FolderOpen,
+                    heading = "Storage Access Required",
+                    subtext = "Android 15 requires All Files Access permission to browse and play videos from external USB drives.",
+                    ctaLabel = "Grant Permission",
+                    onCtaClick = onPermissionClick
+                )
+            } else {
+                CustomEmptyStateView(
+                    icon = Icons.Filled.VideoLibrary,
+                    heading = "No Videos Here",
+                    subtext = "This folder appears to be empty. Try pulling down to refresh or scanning storage.",
+                    ctaLabel = stringResource(R.string.folder_scan_cta),
+                    onCtaClick = onScanClick
+                )
+            }
+        }
+        return
+    }
+
+    val lastPlayedInThisList = remember(videos, historyMap) {
+        videos.mapNotNull { video ->
+            val hist = historyMap[video.uri]
+            val playedAt = hist?.lastPlayedAt
+                ?: if (video.lastPlayedAt != null && video.lastPlayedAt > 0L) video.lastPlayedAt else null
+            if (playedAt != null && playedAt > 0L) video to playedAt else null
+        }.maxByOrNull { it.second }?.first
+    }
+
+    val mostRecentHistoryUri = remember(historyMap, lastPlayedInThisList) {
+        lastPlayedInThisList?.uri
+            ?: historyMap.values.filter { it.lastPlayedAt > 0L }.maxByOrNull { it.lastPlayedAt }?.uri
+    }
+
+    FastScroller(
+        itemCount = videos.size,
+        listState = if (settings.layoutMode == LayoutMode.LIST) listState else null,
+        gridState = if (settings.layoutMode == LayoutMode.GRID) gridState else null,
+        contentPadding = contentPadding,
+        sectionLabelProvider = { index ->
+            FastScrollSectionHelper.getVideoSectionLabel(
+                video = videos.getOrNull(index),
+                sortField = settings.sortField
+            )
+        }
+    ) {
+        if (settings.layoutMode == LayoutMode.GRID) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(settings.gridColumns),
+                state = gridState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 8.dp,
+                    end = 8.dp,
+                    top = contentPadding.calculateTopPadding() + 8.dp,
+                    bottom = contentPadding.calculateBottomPadding() + 8.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(
+                    items = videos,
+                    key = { video -> video.uri },
+                    contentType = { "video_item" }
+                ) { video ->
+                    val isRecentlyPlayed = mostRecentHistoryUri != null && video.uri == mostRecentHistoryUri
+                    VideoGridItem(
+                        video = video,
+                        settings = settings,
+                        isSelected = video in selectedVideos,
+                        isRecentlyPlayed = isRecentlyPlayed,
+                        lastPositionMs = historyMap[video.uri]?.lastPositionMs ?: 0L,
+                        onClick = currentOnVideoClick,
+                        onLongClick = currentOnVideoLongClick
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    top = contentPadding.calculateTopPadding(),
+                    bottom = contentPadding.calculateBottomPadding() + 16.dp
+                )
+            ) {
+                items(
+                    items = videos,
+                    key = { video -> video.uri },
+                    contentType = { "video_item" }
+                ) { video ->
+                    val isRecentlyPlayed = mostRecentHistoryUri != null && video.uri == mostRecentHistoryUri
+                    val onInfo = remember(video, currentOnInfoClick) {
+                        if (onInfoClick != null) {
+                            {
+                                currentOnInfoClick?.invoke(video)
+                                Unit
+                            }
+                        } else {
+                            null
+                        }
+                    }
+                    VideoListItem(
+                        video = video,
+                        settings = settings,
+                        isSelected = video in selectedVideos,
+                        isRecentlyPlayed = isRecentlyPlayed,
+                        lastPositionMs = historyMap[video.uri]?.lastPositionMs ?: 0L,
+                        onClick = currentOnVideoClick,
+                        onLongClick = currentOnVideoLongClick,
+                        onInfoClick = onInfo
+                    )
+                }
+            }
+        }
+    }
+}

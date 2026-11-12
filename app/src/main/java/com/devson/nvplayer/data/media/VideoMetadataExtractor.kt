@@ -1,0 +1,279 @@
+package com.devson.nvplayer.data.media
+
+import android.content.Context
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.os.Build
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileInputStream
+import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.round
+
+object VideoMetadataExtractor {
+
+    private const val TAG = "VideoMetadataExtractor"
+
+    private val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa", "sub", "smi", "idx")
+
+    data class ExtractedDetails(
+        val frameRate: Float?,
+        val embeddedSubtitles: List<String>,
+        val durationMs: Long? = null,
+        val width: Int? = null,
+        val height: Int? = null
+    )
+
+    fun isSubtitleExtension(ext: String?): Boolean {
+        if (ext.isNullOrBlank()) return false
+        return ext.lowercase(Locale.ROOT) in SUBTITLE_EXTENSIONS
+    }
+
+    /**
+     * Locates external subtitle files residing in the same directory that match the video file name.
+     * Returns a distinct list of uppercase extensions (e.g. ["SRT", "ASS"]).
+     */
+    fun findExternalSubtitles(videoPath: String?): List<String> {
+        if (videoPath.isNullOrBlank()) return emptyList()
+        return try {
+            val videoFile = File(videoPath)
+            val parentDir = videoFile.parentFile ?: return emptyList()
+            if (!parentDir.exists() || !parentDir.isDirectory) return emptyList()
+
+            val baseName = videoFile.nameWithoutExtension
+            val subFiles = parentDir.listFiles { f ->
+                f.isFile && isSubtitleExtension(f.extension)
+            } ?: emptyArray()
+
+            val matched = subFiles.filter { sub ->
+                val subBase = sub.nameWithoutExtension
+                subBase.equals(baseName, ignoreCase = true) ||
+                    subBase.startsWith("$baseName.", ignoreCase = true) ||
+                    subBase.startsWith("${baseName}_", ignoreCase = true) ||
+                    subBase.startsWith("$baseName-", ignoreCase = true)
+            }.map { it.extension.uppercase(Locale.ROOT) }.distinct()
+
+            if (matched.isEmpty() && subFiles.size == 1) {
+                // If only a single subtitle file exists in the directory, associate it
+                listOf(subFiles[0].extension.uppercase(Locale.ROOT))
+            } else {
+                matched
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to find external subtitles for $videoPath", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Extracts the real native video framerate (FPS) and embedded subtitle tracks.
+     */
+    suspend fun extractDetails(
+        context: Context,
+        path: String?,
+        uri: Uri,
+        durationMs: Long
+    ): ExtractedDetails = withContext(Dispatchers.IO) {
+        var fps: Float? = null
+        val embeddedSubs = mutableSetOf<String>()
+        var extractedDuration: Long? = if (durationMs > 0L) durationMs else null
+        var extractedWidth: Int? = null
+        var extractedHeight: Int? = null
+
+        val file = if (!path.isNullOrBlank()) File(path) else null
+        val fileExists = file != null && file.exists()
+
+        // 1. Fast Matroska EBML header inspection for MKV/WebM
+        val isMkvOrWebm = path?.endsWith(".mkv", ignoreCase = true) == true ||
+            path?.endsWith(".webm", ignoreCase = true) == true ||
+            uri.toString().endsWith(".mkv", ignoreCase = true) ||
+            uri.toString().endsWith(".webm", ignoreCase = true)
+
+        var fis: FileInputStream? = null
+        var pfd: android.os.ParcelFileDescriptor? = null
+        try {
+            if (file != null && fileExists) {
+                fis = FileInputStream(file)
+            } else {
+                pfd = try {
+                    context.contentResolver.openFileDescriptor(uri, "r")
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            val fd = fis?.fd ?: pfd?.fileDescriptor
+
+            if (fd != null && MatroskaSubtitleDemuxer.isMatroskaFile(fd)) {
+                val headerInfo = MatroskaSubtitleDemuxer.inspectMatroska(fd)
+                if (fps == null && headerInfo.videoFps != null && headerInfo.videoFps > 0f) {
+                    fps = headerInfo.videoFps
+                }
+                headerInfo.subtitleTracks.forEach { track ->
+                    val ext = track.extension.uppercase(Locale.ROOT)
+                    if (ext.isNotBlank()) {
+                        embeddedSubs.add(ext)
+                    } else {
+                        embeddedSubs.add("SUB")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Matroska fast track probe skipped", e)
+        } finally {
+            try { fis?.close() } catch (_: Exception) {}
+            try { pfd?.close() } catch (_: Exception) {}
+        }
+
+        // 2. MediaExtractor native inspection for Video FPS & Subtitle tracks
+        try {
+            val extractor = MediaExtractor()
+            try {
+                if (file != null && fileExists && file.canRead()) {
+                    extractor.setDataSource(file.absolutePath)
+                } else {
+                    extractor.setDataSource(context, uri, null)
+                }
+
+                val trackCount = extractor.trackCount
+                for (i in 0 until trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+
+                    if (mime.startsWith("video/")) {
+                        if (extractedWidth == null && format.containsKey(MediaFormat.KEY_WIDTH)) {
+                            try { extractedWidth = format.getInteger(MediaFormat.KEY_WIDTH) } catch (_: Exception) {}
+                        }
+                        if (extractedHeight == null && format.containsKey(MediaFormat.KEY_HEIGHT)) {
+                            try { extractedHeight = format.getInteger(MediaFormat.KEY_HEIGHT) } catch (_: Exception) {}
+                        }
+                        if (extractedDuration == null && format.containsKey(MediaFormat.KEY_DURATION)) {
+                            try { extractedDuration = format.getLong(MediaFormat.KEY_DURATION) / 1000L } catch (_: Exception) {}
+                        }
+                        if (fps == null && format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                            try {
+                                val rateInt = format.getInteger(MediaFormat.KEY_FRAME_RATE)
+                                if (rateInt > 0) fps = rateInt.toFloat()
+                            } catch (_: Exception) {
+                                try {
+                                    val rateFloat = format.getFloat(MediaFormat.KEY_FRAME_RATE)
+                                    if (rateFloat > 0f) fps = rateFloat
+                                } catch (_: Exception) {}
+                            }
+                        }
+                        if (fps == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && format.containsKey(MediaFormat.KEY_CAPTURE_RATE)) {
+                            try {
+                                val capRate = format.getFloat(MediaFormat.KEY_CAPTURE_RATE)
+                                if (capRate > 0f) fps = capRate
+                            } catch (_: Exception) {}
+                        }
+                    } else if (mime.startsWith("text/") || mime.startsWith("application/")) {
+                        val subExt = when {
+                            mime.contains("subrip", ignoreCase = true) || mime.contains("srt", ignoreCase = true) -> "SRT"
+                            mime.contains("vtt", ignoreCase = true) -> "VTT"
+                            mime.contains("ass", ignoreCase = true) || mime.contains("ssa", ignoreCase = true) -> "ASS"
+                            mime.contains("pgs", ignoreCase = true) -> "PGS"
+                            mime.contains("dvb", ignoreCase = true) -> "DVB"
+                            mime.contains("tx3g", ignoreCase = true) || mime.contains("quicktime", ignoreCase = true) -> "SUB"
+                            else -> "SUB"
+                        }
+                        embeddedSubs.add(subExt)
+                    }
+                }
+            } finally {
+                extractor.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaExtractor inspection failed: ${e.localizedMessage}")
+        }
+
+        // 3. Fallback: MediaMetadataRetriever for capture framerate or dimensions/duration
+        if (fps == null || fps <= 0f || extractedDuration == null || extractedWidth == null || extractedHeight == null) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                if (file != null && fileExists && file.canRead()) {
+                    retriever.setDataSource(file.absolutePath)
+                } else {
+                    retriever.setDataSource(context, uri)
+                }
+
+                if (extractedDuration == null || extractedDuration <= 0L) {
+                    val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    val dur = durStr?.toLongOrNull()
+                    if (dur != null && dur > 0L) extractedDuration = dur
+                }
+                var w = extractedWidth
+                var h = extractedHeight
+                if (w == null || w <= 0) {
+                    val wStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    val parsedW = wStr?.toIntOrNull()
+                    if (parsedW != null && parsedW > 0) w = parsedW
+                }
+                if (h == null || h <= 0) {
+                    val hStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    val parsedH = hStr?.toIntOrNull()
+                    if (parsedH != null && parsedH > 0) h = parsedH
+                }
+                val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                if (rotation == 90 || rotation == 270) {
+                    if (w != null && h != null) {
+                        val temp = w
+                        w = h
+                        h = temp
+                    }
+                }
+                extractedWidth = w
+                extractedHeight = h
+
+                val capRateStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+                val capRate = capRateStr?.toFloatOrNull()
+                if (capRate != null && capRate > 0f) {
+                    fps = capRate
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val frameCountStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)
+                    val frameCount = frameCountStr?.toLongOrNull()
+                    val dur = if (durationMs > 0L) {
+                        durationMs
+                    } else {
+                        extractedDuration ?: 0L
+                    }
+                    if (frameCount != null && frameCount > 0L && dur > 0L) {
+                        fps = (frameCount * 1000f) / dur.toFloat()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "MediaMetadataRetriever inspection failed: ${e.localizedMessage}")
+            } finally {
+                try {
+                    retriever.release()
+                } catch (_: Exception) {}
+            }
+        }
+
+        // Normalize and clean up FPS value
+        val cleanFps = fps?.let { raw ->
+            if (raw > 0f && raw <= 360f) {
+                val rounded = round(raw * 100f) / 100f
+                if (abs(rounded - round(rounded)) < 0.01f) {
+                    round(rounded)
+                } else {
+                    rounded
+                }
+            } else {
+                null
+            }
+        }
+
+        ExtractedDetails(
+            frameRate = cleanFps,
+            embeddedSubtitles = embeddedSubs.toList(),
+            durationMs = extractedDuration,
+            width = extractedWidth,
+            height = extractedHeight
+        )
+    }
+}
